@@ -10,14 +10,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - name: Connect runner to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:macos-test
-
-      - name: Start private macOS desktop
+      - name: Start noVNC desktop
         shell: bash
         env:
           VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
@@ -32,12 +25,15 @@ jobs:
 
           novnc_dir="${RUNNER_TEMP}/noVNC"
           venv_dir="${RUNNER_TEMP}/websockify-venv"
-          log_file="${RUNNER_TEMP}/websockify.log"
-          pid_file="${RUNNER_TEMP}/websockify.pid"
+          websockify_log="${RUNNER_TEMP}/websockify.log"
+          cloudflared_log="${RUNNER_TEMP}/cloudflared.log"
+          websockify_pid="${RUNNER_TEMP}/websockify.pid"
+          cloudflared_pid="${RUNNER_TEMP}/cloudflared.pid"
 
           git clone --depth 1 https://github.com/novnc/noVNC.git "$novnc_dir"
           python3 -m venv "$venv_dir"
           "$venv_dir/bin/python" -m pip install --disable-pip-version-check websockify
+          brew install cloudflared
 
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
@@ -57,8 +53,8 @@ jobs:
           fi
 
           "$venv_dir/bin/websockify" --web="$novnc_dir" \
-            127.0.0.1:6080 127.0.0.1:5900 >"$log_file" 2>&1 &
-          echo "$!" > "$pid_file"
+            127.0.0.1:6080 127.0.0.1:5900 >"$websockify_log" 2>&1 &
+          echo "$!" > "$websockify_pid"
 
           ready=0
           for attempt in {1..30}; do
@@ -69,15 +65,31 @@ jobs:
             sleep 1
           done
           if (( ready == 0 )); then
-            cat "$log_file"
-            echo "::error::noVNC did not start; see websockify output above."
+            cat "$websockify_log"
+            echo "::error::noVNC did not start."
             exit 1
           fi
 
-          tailscale serve --bg 6080
-          echo "Private Tailscale desktop endpoint:"
-          tailscale serve status
-          echo "Connect a device signed in to your tailnet, then use the VNC password stored in MAC_VNC_PASSWORD."
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 \
+            >"$cloudflared_log" 2>&1 &
+          echo "$!" > "$cloudflared_pid"
+
+          tunnel_url=""
+          for attempt in {1..30}; do
+            tunnel_url="$(grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' "$cloudflared_log" | head -n 1 || true)"
+            if [[ -n "$tunnel_url" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ -z "$tunnel_url" ]]; then
+            cat "$cloudflared_log"
+            echo "::error::Cloudflare did not provide a temporary tunnel URL."
+            exit 1
+          fi
+
+          echo "::notice title=noVNC URL::$tunnel_url/vnc.html"
+          echo "noVNC URL: $tunnel_url/vnc.html"
 
           while sleep 60; do
             :
@@ -87,13 +99,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [[ -f "${RUNNER_TEMP}/websockify.pid" ]]; then
-            read -r pid < "${RUNNER_TEMP}/websockify.pid"
-            if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid"
+          for pid_file in "${RUNNER_TEMP}/websockify.pid" "${RUNNER_TEMP}/cloudflared.pid"; do
+            if [[ -f "$pid_file" ]]; then
+              read -r pid < "$pid_file"
+              if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" || echo "::warning::Could not stop process $pid."
+              fi
             fi
-          fi
-
-          if command -v tailscale >/dev/null 2>&1; then
-            tailscale serve reset || echo "::warning::Could not reset Tailscale Serve."
-          fi
+          done
