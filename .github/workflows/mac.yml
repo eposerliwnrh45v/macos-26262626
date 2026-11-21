@@ -1,9 +1,9 @@
 name: Private macOS Test Desktop
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - copilot/guacamole-tailscale-port
+  repository_dispatch:
+    types:
+      - novnc-test
 
 jobs:
   mac:
