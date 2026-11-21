@@ -6,27 +6,17 @@ jobs:
   mac:
     runs-on: macos-latest
     steps:
-      - name: Configure remote access and start tunnel
+      - name: Start Mac
         shell: bash
         run: |
           brew install cloudflared
-          git clone --depth 1 https://github.com/novnc/noVNC.git
-
+          git clone --depth 1 https://github.com
           python3 -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip websockify
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw password123 \
-            -restart -agent -privs -all
-
+          .venv/bin/python -m pip install websockify
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes -clientopts -setvncpw -vncpw password123 -restart -agent -privs -all
           .venv/bin/websockify --web=./noVNC 6080 localhost:5900 &
           sleep 3
-
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           sleep 12
-
           grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel.log | head -n 1
-
           sleep 19800
