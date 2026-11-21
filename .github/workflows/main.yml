@@ -1,6 +1,11 @@
 name: Private macOS Test Desktop
 on:
   workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: "Password for noVNC (first 8 characters are used)"
+        required: false
+        type: string
 
 jobs:
   mac:
@@ -10,7 +15,7 @@ jobs:
       - name: Start noVNC desktop
         shell: bash
         env:
-          VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
+          VNC_PASSWORD: ${{ inputs.vnc_password || secrets.MAC_VNC_PASSWORD }}
         run: |
           set -euo pipefail
           export LC_ALL=C
