@@ -9,8 +9,6 @@ jobs:
       - name: Configure remote access and start tunnel
         shell: bash
         run: |
-          set -euo pipefail
-
           brew install cloudflared
           git clone --depth 1 https://github.com/novnc/noVNC.git
 
@@ -20,14 +18,14 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "${{ secrets.VNC_PASSWORD }}" \
+            -clientopts -setvncpw -vncpw password123 \
             -restart -agent -privs -all
 
           .venv/bin/websockify --web=./noVNC 6080 localhost:5900 &
           sleep 3
 
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
-          sleep 10
+          sleep 12
 
           grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel.log | head -n 1
 
