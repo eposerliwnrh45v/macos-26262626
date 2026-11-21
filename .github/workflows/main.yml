@@ -41,11 +41,11 @@ jobs:
           "$venv_dir/bin/python" -m pip install --disable-pip-version-check websockify
           brew install cloudflared
 
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
-            -restart -agent -privs -all
+          kickstart=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo "$kickstart" -activate -configure -access -on -privs -all
+          sudo "$kickstart" -configure -clientopts -setvnclegacy -vnclegacy yes
+          sudo "$kickstart" -configure -clientopts -setvncpw -vncpw "$VNC_PASSWORD"
+          sudo "$kickstart" -restart -agent
 
           for attempt in {1..30}; do
             if nc -z 127.0.0.1 5900; then
