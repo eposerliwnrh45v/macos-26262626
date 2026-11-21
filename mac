@@ -18,9 +18,13 @@ jobs:
           set -euo pipefail
           export LC_ALL=C
 
-          if [[ ! "${VNC_PASSWORD:-}" =~ ^[[:graph:]]{8}$ ]]; then
-            echo "::error::Set MAC_VNC_PASSWORD to exactly 8 printable ASCII characters."
+          if [[ ! "${VNC_PASSWORD:-}" =~ ^[[:print:]]{8,}$ ]]; then
+            echo "::error::Set MAC_VNC_PASSWORD to at least 8 printable ASCII characters."
             exit 1
+          fi
+          if (( ${#VNC_PASSWORD} > 8 )); then
+            echo "::notice::Legacy VNC uses only the first 8 characters of MAC_VNC_PASSWORD."
+            VNC_PASSWORD="${VNC_PASSWORD:0:8}"
           fi
 
           novnc_dir="${RUNNER_TEMP}/noVNC"
