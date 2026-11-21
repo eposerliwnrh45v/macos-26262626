@@ -1,6 +1,9 @@
 name: Private macOS Test Desktop
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - copilot/guacamole-tailscale-port
 
 jobs:
   mac:
