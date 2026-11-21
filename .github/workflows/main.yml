@@ -15,7 +15,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:macos-test
+          tags: tag:ci
 
       - name: Start private macOS desktop
         shell: bash
@@ -30,14 +30,34 @@ jobs:
             exit 1
           fi
 
-          novnc_dir="${RUNNER_TEMP}/noVNC"
-          venv_dir="${RUNNER_TEMP}/websockify-venv"
-          log_file="${RUNNER_TEMP}/websockify.log"
-          pid_file="${RUNNER_TEMP}/websockify.pid"
+          guac_home="${RUNNER_TEMP}/guacamole"
+          mkdir -p "$guac_home"
+          chmod 700 "$guac_home"
 
-          git clone --depth 1 https://github.com/novnc/noVNC.git "$novnc_dir"
-          python3 -m venv "$venv_dir"
-          "$venv_dir/bin/python" -m pip install --disable-pip-version-check websockify
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.Element("user-mapping")
+          user = ET.SubElement(
+              root,
+              "authorize",
+              username="runner",
+              password=os.environ["VNC_PASSWORD"],
+          )
+          connection = ET.SubElement(user, "connection", name="macOS desktop")
+          ET.SubElement(connection, "protocol").text = "vnc"
+          for name, value in {
+              "hostname": "host.docker.internal",
+              "port": "5900",
+              "password": os.environ["VNC_PASSWORD"],
+          }.items():
+              ET.SubElement(connection, "param", name=name).text = value
+
+          path = os.path.join(os.environ["RUNNER_TEMP"], "guacamole", "user-mapping.xml")
+          ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+          os.chmod(path, 0o600)
+          PY
 
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
@@ -56,28 +76,38 @@ jobs:
             exit 1
           fi
 
-          "$venv_dir/bin/websockify" --web="$novnc_dir" \
-            127.0.0.1:6080 127.0.0.1:5900 >"$log_file" 2>&1 &
-          echo "$!" > "$pid_file"
+          brew install colima docker
+          colima start --cpu 2 --memory 4 --disk 20
+          docker info >/dev/null
+          docker network create guacamole
+
+          docker run --detach --name guacd --network guacamole \
+            guacamole/guacd:1.6.0
+          docker run --detach --name guacamole --network guacamole \
+            --publish 127.0.0.1:8080:8080 \
+            --volume "$guac_home:/etc/guacamole:ro" \
+            --env GUACD_HOSTNAME=guacd \
+            guacamole/guacamole:1.6.0
 
           ready=0
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:6080/vnc.html >/dev/null; then
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8080/guacamole/ >/dev/null; then
               ready=1
               break
             fi
-            sleep 1
+            sleep 2
           done
           if (( ready == 0 )); then
-            cat "$log_file"
-            echo "::error::noVNC did not start; see websockify output above."
+            docker logs guacamole
+            docker logs guacd
+            echo "::error::Apache Guacamole did not become ready."
             exit 1
           fi
 
-          tailscale serve --bg 6080
-          echo "Private Tailscale desktop endpoint:"
+          tailscale serve --bg --tcp=8080 tcp://localhost:8080
+          echo "Connect over Tailscale to http://$(tailscale ip -4):8080/guacamole/"
           tailscale serve status
-          echo "Connect a device signed in to your tailnet, then use the VNC password stored in MAC_VNC_PASSWORD."
+          echo "Log in as runner with the password stored in MAC_VNC_PASSWORD."
 
           while sleep 60; do
             :
@@ -87,11 +117,13 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [[ -f "${RUNNER_TEMP}/websockify.pid" ]]; then
-            read -r pid < "${RUNNER_TEMP}/websockify.pid"
-            if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid"
-            fi
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            docker rm --force guacamole guacd >/dev/null 2>&1 || echo "::warning::Could not remove Guacamole containers."
+            docker network rm guacamole >/dev/null 2>&1 || echo "::warning::Could not remove the Guacamole network."
+          fi
+
+          if command -v colima >/dev/null 2>&1; then
+            colima stop || echo "::warning::Could not stop Colima."
           fi
 
           if command -v tailscale >/dev/null 2>&1; then
