@@ -10,14 +10,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - name: Connect runner to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-
-      - name: Start private macOS desktop
+      - name: Start noVNC desktop
         shell: bash
         env:
           VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
@@ -30,34 +23,17 @@ jobs:
             exit 1
           fi
 
-          guac_home="${RUNNER_TEMP}/guacamole"
-          mkdir -p "$guac_home"
-          chmod 700 "$guac_home"
+          novnc_dir="${RUNNER_TEMP}/noVNC"
+          venv_dir="${RUNNER_TEMP}/websockify-venv"
+          websockify_log="${RUNNER_TEMP}/websockify.log"
+          cloudflared_log="${RUNNER_TEMP}/cloudflared.log"
+          websockify_pid="${RUNNER_TEMP}/websockify.pid"
+          cloudflared_pid="${RUNNER_TEMP}/cloudflared.pid"
 
-          python3 - <<'PY'
-          import os
-          import xml.etree.ElementTree as ET
-
-          root = ET.Element("user-mapping")
-          user = ET.SubElement(
-              root,
-              "authorize",
-              username="runner",
-              password=os.environ["VNC_PASSWORD"],
-          )
-          connection = ET.SubElement(user, "connection", name="macOS desktop")
-          ET.SubElement(connection, "protocol").text = "vnc"
-          for name, value in {
-              "hostname": "host.docker.internal",
-              "port": "5900",
-              "password": os.environ["VNC_PASSWORD"],
-          }.items():
-              ET.SubElement(connection, "param", name=name).text = value
-
-          path = os.path.join(os.environ["RUNNER_TEMP"], "guacamole", "user-mapping.xml")
-          ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
-          os.chmod(path, 0o600)
-          PY
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$novnc_dir"
+          python3 -m venv "$venv_dir"
+          "$venv_dir/bin/python" -m pip install --disable-pip-version-check websockify
+          brew install cloudflared
 
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
@@ -76,38 +52,44 @@ jobs:
             exit 1
           fi
 
-          brew install colima docker
-          colima start --cpu 2 --memory 4 --disk 20
-          docker info >/dev/null
-          docker network create guacamole
-
-          docker run --detach --name guacd --network guacamole \
-            guacamole/guacd:1.6.0
-          docker run --detach --name guacamole --network guacamole \
-            --publish 127.0.0.1:8080:8080 \
-            --volume "$guac_home:/etc/guacamole:ro" \
-            --env GUACD_HOSTNAME=guacd \
-            guacamole/guacamole:1.6.0
+          "$venv_dir/bin/websockify" --web="$novnc_dir" \
+            127.0.0.1:6080 127.0.0.1:5900 >"$websockify_log" 2>&1 &
+          echo "$!" > "$websockify_pid"
 
           ready=0
-          for attempt in {1..60}; do
-            if curl --fail --silent http://127.0.0.1:8080/guacamole/ >/dev/null; then
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:6080/vnc.html >/dev/null; then
               ready=1
               break
             fi
-            sleep 2
+            sleep 1
           done
           if (( ready == 0 )); then
-            docker logs guacamole
-            docker logs guacd
-            echo "::error::Apache Guacamole did not become ready."
+            cat "$websockify_log"
+            echo "::error::noVNC did not start."
             exit 1
           fi
 
-          tailscale serve --bg --tcp=8080 tcp://localhost:8080
-          echo "Connect over Tailscale to http://$(tailscale ip -4):8080/guacamole/"
-          tailscale serve status
-          echo "Log in as runner with the password stored in MAC_VNC_PASSWORD."
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 \
+            >"$cloudflared_log" 2>&1 &
+          echo "$!" > "$cloudflared_pid"
+
+          tunnel_url=""
+          for attempt in {1..30}; do
+            tunnel_url="$(grep -Eo 'https://[[:alnum:]-]+\.trycloudflare\.com' "$cloudflared_log" | head -n 1 || true)"
+            if [[ -n "$tunnel_url" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ -z "$tunnel_url" ]]; then
+            cat "$cloudflared_log"
+            echo "::error::Cloudflare did not provide a temporary tunnel URL."
+            exit 1
+          fi
+
+          echo "::notice title=noVNC URL::$tunnel_url/vnc.html"
+          echo "noVNC URL: $tunnel_url/vnc.html"
 
           while sleep 60; do
             :
@@ -117,15 +99,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-            docker rm --force guacamole guacd >/dev/null 2>&1 || echo "::warning::Could not remove Guacamole containers."
-            docker network rm guacamole >/dev/null 2>&1 || echo "::warning::Could not remove the Guacamole network."
-          fi
-
-          if command -v colima >/dev/null 2>&1; then
-            colima stop || echo "::warning::Could not stop Colima."
-          fi
-
-          if command -v tailscale >/dev/null 2>&1; then
-            tailscale serve reset || echo "::warning::Could not reset Tailscale Serve."
-          fi
+          for pid_file in "${RUNNER_TEMP}/websockify.pid" "${RUNNER_TEMP}/cloudflared.pid"; do
+            if [[ -f "$pid_file" ]]; then
+              read -r pid < "$pid_file"
+              if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" || echo "::warning::Could not stop process $pid."
+              fi
+            fi
+          done
