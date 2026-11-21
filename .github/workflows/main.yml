@@ -1,17 +1,99 @@
-name: Browser Mac
-on: workflow_dispatch
+name: Private macOS Test Desktop
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   mac:
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
-      - name: Start Mac
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:macos-test
+
+      - name: Start private macOS desktop
+        shell: bash
+        env:
+          VNC_PASSWORD: ${{ secrets.MAC_VNC_PASSWORD }}
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes -clientopts -setvncpw -vncpw password123 -restart -agent -privs -all
-          brew install novnc cloudflared
-          novnc --vnc localhost:5900 --listen 6080 &
-          sleep 3
-          cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
-          sleep 8
-          grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel.log | head -n 1
-          sleep 19800
+          set -euo pipefail
+          export LC_ALL=C
+
+          if [[ ! "${VNC_PASSWORD:-}" =~ ^[[:graph:]]{8}$ ]]; then
+            echo "::error::Set MAC_VNC_PASSWORD to exactly 8 printable ASCII characters."
+            exit 1
+          fi
+
+          novnc_dir="${RUNNER_TEMP}/noVNC"
+          venv_dir="${RUNNER_TEMP}/websockify-venv"
+          log_file="${RUNNER_TEMP}/websockify.log"
+          pid_file="${RUNNER_TEMP}/websockify.pid"
+
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$novnc_dir"
+          python3 -m venv "$venv_dir"
+          "$venv_dir/bin/python" -m pip install --disable-pip-version-check websockify
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent -privs -all
+
+          for attempt in {1..30}; do
+            if nc -z 127.0.0.1 5900; then
+              break
+            fi
+            sleep 1
+          done
+          if ! nc -z 127.0.0.1 5900; then
+            echo "::error::The macOS runner did not start its VNC service."
+            exit 1
+          fi
+
+          "$venv_dir/bin/websockify" --web="$novnc_dir" \
+            127.0.0.1:6080 127.0.0.1:5900 >"$log_file" 2>&1 &
+          echo "$!" > "$pid_file"
+
+          ready=0
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:6080/vnc.html >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if (( ready == 0 )); then
+            cat "$log_file"
+            echo "::error::noVNC did not start; see websockify output above."
+            exit 1
+          fi
+
+          tailscale serve --bg 6080
+          echo "Private Tailscale desktop endpoint:"
+          tailscale serve status
+          echo "Connect a device signed in to your tailnet, then use the VNC password stored in MAC_VNC_PASSWORD."
+
+          while sleep 60; do
+            :
+          done
+
+      - name: Stop private desktop
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "${RUNNER_TEMP}/websockify.pid" ]]; then
+            read -r pid < "${RUNNER_TEMP}/websockify.pid"
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid"
+            fi
+          fi
+
+          if command -v tailscale >/dev/null 2>&1; then
+            tailscale serve reset || echo "::warning::Could not reset Tailscale Serve."
+          fi
