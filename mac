@@ -9,7 +9,9 @@ jobs:
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -clientopts -setvnclegacy -vnclegacy yes -clientopts -setvncpw -vncpw password123 -restart -agent -privs -all
           brew install cloudflared
-          pip3 install --break-system-packages websockify
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install websockify
           git clone https://github.com
           ./noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 &
           sleep 3
